@@ -7,15 +7,15 @@
   },
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,magenta \"pnpm dev:api\" \"pnpm dev:web\"",
-    "dev:api": "tsx watch server/index.ts",
+    "dev:api": "NODE_USE_ENV_PROXY=1 tsx watch server/index.ts",
     "dev:web": "vite",
-    "dev:fake": "concurrently -k -n fake,api,web -c yellow,blue,magenta \"pnpm fake-api\" \"DIGITAL_GOODS_BASE_URL=http://localhost:4010 pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:fake": "concurrently -k -n fake,api,web -c yellow,blue,magenta \"pnpm fake-api\" \"NO_PROXY=localhost,127.0.0.1 DIGITAL_GOODS_BASE_URL=http://127.0.0.1:4010 pnpm dev:api\" \"pnpm dev:web\"",
     "fake-api": "tsx scripts/fake-api.ts",
     "db:migrate": "tsx server/db/cli.ts migrate",
     "db:seed": "tsx server/db/cli.ts seed",
     "db:setup": "tsx server/db/cli.ts migrate seed",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "start": "NODE_ENV=production NODE_USE_ENV_PROXY=1 tsx server/index.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

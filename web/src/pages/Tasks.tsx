@@ -40,7 +40,7 @@ export function Tasks() {
                 <p>{t.description}</p>
                 <div className="card-foot">
                   <span className="reward num">+{t.reward}</span>
-                  <button className={`btn${t.completed ? '' : ' primary'}`} disabled={t.completed || busy === t.id} onClick={() => complete(t)}>
+                  <button className="btn" disabled={t.completed || busy === t.id} onClick={() => complete(t)}>
                     {t.completed ? (kind === 'daily' ? '今日已领' : '已完成') : busy === t.id ? '领取中…' : '完成并领取'}
                   </button>
                 </div>

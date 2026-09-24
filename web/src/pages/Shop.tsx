@@ -29,7 +29,7 @@ export function Shop() {
               <p>{p.description}</p>
               <div className="card-foot">
                 <span className="price num">{fmtNum(p.price)}<small>积分</small></span>
-                <button className="btn primary" disabled={short > 0} onClick={() => setSelected(p)}>
+                <button className="btn" disabled={short > 0} onClick={() => setSelected(p)}>
                   {short > 0 ? `还差 ${fmtNum(short)}` : '兑换'}
                 </button>
               </div>
