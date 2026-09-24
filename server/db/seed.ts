@@ -15,8 +15,8 @@ export const PRODUCTS = [
   { id: 'ebook', name: '数字手册', description: '一本电子手册的兑换码', price: 100, fulfillment: 'external', external: 'ebook' },
   { id: 'theme', name: '主题包', description: '一套界面主题的兑换码', price: 150, fulfillment: 'external', external: 'theme' },
   { id: 'course', name: '课程权限', description: '一门在线课程的访问兑换码', price: 300, fulfillment: 'external', external: 'course' },
-  { id: 'avatar_frame', name: '头像框 · 极光', description: '站内权益，兑换后立即生效', price: 60, fulfillment: 'internal', external: null },
-  { id: 'name_color', name: '昵称高亮', description: '站内权益，兑换后立即生效', price: 40, fulfillment: 'internal', external: null },
+  { id: 'avatar_frame', name: '头像框', description: '站内权益，兑换后立即生效', price: 60, fulfillment: 'internal', external: null },
+  { id: 'name_color', name: '昵称特效', description: '站内权益，兑换后立即生效', price: 40, fulfillment: 'internal', external: null },
 ] as const;
 
 export const SEED_USERS = [
