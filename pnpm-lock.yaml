@@ -32,6 +32,9 @@ importers:
       react-router-dom:
         specifier: ^7.18.4
         version: 7.18.4(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      tsx:
+        specifier: ^4.23.15
+        version: 4.23.15
     devDependencies:
       '@types/node':
         specifier: ^26.6.2
@@ -51,9 +54,6 @@ importers:
       concurrently:
         specifier: ^10.0.5
         version: 10.0.5
-      tsx:
-        specifier: ^4.23.15
-        version: 4.23.15
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
