@@ -17,11 +17,6 @@ export async function getSummary(db: Db, userId: string) {
   return rows[0]!;
 }
 
-export async function getBalance(db: Db, userId: string): Promise<number> {
-  const { rows } = await db.query<{ balance: number }>('SELECT balance FROM users WHERE id = $1', [userId]);
-  return rows[0]?.balance ?? 0;
-}
-
 export async function listLedger(db: Db, userId: string) {
   const { rows } = await db.query(
     `SELECT id, delta, balance_after AS "balanceAfter", kind, description,

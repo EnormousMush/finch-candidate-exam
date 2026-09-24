@@ -4,7 +4,7 @@ import type { Db } from './db/pool.js';
 import type { DigitalGoodsClient } from './external/digitalGoods.js';
 import { AppError } from './errors.js';
 import * as auth from './services/auth.js';
-import { getBalance, getSummary, listLedger, listProducts } from './services/account.js';
+import { getSummary, listLedger, listProducts } from './services/account.js';
 import { completeTask, listTasks } from './services/tasks.js';
 import { getOrder, listOrders, redeem } from './services/orders.js';
 
@@ -34,6 +34,10 @@ export async function buildApp({ db, goods, cookieSecure = false, logger = false
     const e = err as { validation?: unknown; statusCode?: number; message?: string };
     if (e.validation) {
       return reply.status(400).send({ error: { code: 'INVALID_REQUEST', message: e.message } });
+    }
+    // Fastify 自己产生的 4xx（JSON 解析失败、请求体过大等）原样返回，别当成 500 让前端误以为「可以重试」
+    if (e.statusCode && e.statusCode >= 400 && e.statusCode < 500) {
+      return reply.status(e.statusCode).send({ error: { code: 'INVALID_REQUEST', message: e.message } });
     }
     app.log.error(err);
     return reply.status(500).send({ error: { code: 'INTERNAL', message: '服务器内部错误' } });
@@ -83,10 +87,7 @@ export async function buildApp({ db, goods, cookieSecure = false, logger = false
   app.register(async (priv) => {
     priv.addHook('preHandler', requireUser);
 
-    priv.get('/api/me', async (req) => {
-      const summary = await getSummary(db, req.user.id);
-      return { user: req.user, balance: summary.balance, summary };
-    });
+    priv.get('/api/me', async (req) => ({ user: req.user, summary: await getSummary(db, req.user.id) }));
 
     priv.get('/api/ledger', async (req) => ({ entries: await listLedger(db, req.user.id) }));
 
@@ -113,8 +114,7 @@ export async function buildApp({ db, goods, cookieSecure = false, logger = false
         },
       },
     }, async (req) => {
-      const order = await redeem({ db, goods }, req.user.id, req.body.productId, req.body.idempotencyKey);
-      return { order, balance: await getBalance(db, req.user.id) };
+      return { order: await redeem({ db, goods }, req.user.id, req.body.productId, req.body.idempotencyKey) };
     });
   });
 

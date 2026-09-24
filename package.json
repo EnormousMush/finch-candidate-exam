@@ -2,14 +2,15 @@
   "name": "points-exchange",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.28.1",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,magenta \"pnpm dev:api\" \"pnpm dev:web\"",
     "dev:api": "NODE_USE_ENV_PROXY=1 tsx watch server/index.ts",
     "dev:web": "vite",
-    "dev:fake": "concurrently -k -n fake,api,web -c yellow,blue,magenta \"pnpm fake-api\" \"NO_PROXY=localhost,127.0.0.1 DIGITAL_GOODS_BASE_URL=http://127.0.0.1:4010 pnpm dev:api\" \"pnpm dev:web\"",
+    "dev:fake": "concurrently -k -n fake,api,web -c yellow,blue,magenta \"DIGITAL_GOODS_API_KEY=test-key pnpm fake-api\" \"DIGITAL_GOODS_API_KEY=test-key NO_PROXY=localhost,127.0.0.1 DIGITAL_GOODS_BASE_URL=http://127.0.0.1:${FAKE_API_PORT:-4010} pnpm dev:api\" \"pnpm dev:web\"",
     "fake-api": "tsx scripts/fake-api.ts",
     "db:migrate": "tsx server/db/cli.ts migrate",
     "db:seed": "tsx server/db/cli.ts seed",
@@ -27,7 +28,8 @@
     "pg": "^8.23.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "react-router-dom": "^7.18.4"
+    "react-router-dom": "^7.18.4",
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
@@ -36,9 +38,13 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^10.0.5",
-    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

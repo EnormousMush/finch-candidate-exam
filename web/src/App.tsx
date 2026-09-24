@@ -14,16 +14,26 @@ export function App() {
   const [toastMsg, setToastMsg] = useState<{ msg: string; bad: boolean } | null>(null);
   const toastTimer = useRef<number>(undefined);
 
+  // 刷新顶部概览。401 表示未登录；其他错误（网络抖动等）保留当前状态，不打断用户
   const refresh = useCallback(async () => {
     try {
       setSession(await api.me());
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setSession(null);
-      else throw err;
     }
   }, []);
 
-  useEffect(() => { refresh().catch(() => setSession(null)); }, [refresh]);
+  useEffect(() => {
+    refresh().finally(() => setSession((s) => (s === undefined ? null : s)));
+  }, [refresh]);
+
+  // 有处理中的订单时，不管在哪个页面都定时刷新概览：后台发放或退款会改变余额
+  const processing = session?.summary.processing ?? 0;
+  useEffect(() => {
+    if (!processing) return;
+    const timer = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(timer);
+  }, [processing, refresh]);
 
   const toast = useCallback((msg: string, bad = false) => {
     window.clearTimeout(toastTimer.current);
@@ -36,7 +46,7 @@ export function App() {
 
   const { user, summary } = session;
   const logout = async () => {
-    await api.logout();
+    await api.logout().catch(() => {});
     setSession(null);
   };
 

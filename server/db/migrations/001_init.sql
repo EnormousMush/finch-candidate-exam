@@ -58,11 +58,13 @@ CREATE TABLE orders (
   user_id         BIGINT NOT NULL REFERENCES users(id),
   product_id      TEXT NOT NULL REFERENCES products(id),
   price           INTEGER NOT NULL CHECK (price > 0),       -- 下单时的价格快照
+  external_product_id TEXT,                                 -- 下单时的外部 productId 快照（站内商品为 NULL）
   idempotency_key TEXT NOT NULL,                            -- 前端生成，防双击/重发
   status          TEXT NOT NULL CHECK (status IN ('processing', 'delivered', 'failed')),
   code            TEXT,
   failure_reason  TEXT,
-  attempts        INTEGER NOT NULL DEFAULT 0,
+  attempts        INTEGER NOT NULL DEFAULT 0,               -- 总尝试次数（含 401/429），决定退避间隔
+  uncertain_posts INTEGER NOT NULL DEFAULT 0,               -- 结果不确定的 POST 次数，达到上限后改用 GET 确认
   last_error      TEXT,
   next_attempt_at TIMESTAMPTZ,                              -- 后台补发的下次时间
   lease_until     TIMESTAMPTZ,                              -- 谁正在处理它（避免同时两个人调外部 API）

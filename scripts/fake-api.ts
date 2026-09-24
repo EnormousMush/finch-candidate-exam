@@ -8,7 +8,13 @@ import { startFakeGoods, type Plan } from './fakeGoodsServer.js';
 const port = Number(process.env.FAKE_API_PORT ?? 4010);
 
 function chaos(nth: number): Plan | undefined {
-  if (nth > 1) return Math.random() < 0.7 ? undefined : { commit: false, status: 503 }; // 重试大多会成功
+  if (nth > 1) {
+    // 重试：大多成功；偶尔仍然故障；偶尔商品不可用（应用会先 GET 确认外部没有码，再退款）
+    const r = Math.random();
+    if (r < 0.6) return undefined;
+    if (r < 0.85) return { commit: false, status: 503 };
+    return { commit: false, status: 422 };
+  }
   const r = Math.random();
   if (r < 0.45) return undefined;                                   // 正常
   if (r < 0.60) return { delayMs: 12_000 };                          // 很慢：同步等待超时，码其实已生成

@@ -12,8 +12,10 @@ import { applyPoints } from './points.js';
  *   ③ 按结果落库：
  *        delivered → 存码，完成
  *        rejected  → 外部明确没发码 → 标记失败 + 退款（同一事务）
+ *                    （若之前有过结果不确定的 POST，先 GET 确认外部确实没有这笔，再退款）
  *        unknown   → 不知道发没发 → 保持 processing，交给后台按退避重试（同一个 requestId，不会重复发码）
- *   ④ 重试到上限后改用 GET 确认：查到码就补记发放；确认 404 才退款；GET 也失败就继续等。
+ *   ④ 结果不确定的 POST 达到上限后改用 GET 确认：查到码就补记发放；确认 404 才退款；GET 也失败就继续等。
+ *      401 / 429 这类「确定没发码、但稍后可能成功」的结果不计入上限，只是按退避继续等。
  *
  * 扣分先于外部调用，所以「码发了但分没扣」不可能出现；
  * 未知状态永不退款，所以「分退了但码其实发了」也不可能出现。
@@ -22,7 +24,7 @@ import { applyPoints } from './points.js';
 export const SYNC_TIMEOUT_MS = 8_000;
 export const WORKER_TIMEOUT_MS = 10_000;
 const LEASE_MS = 30_000;
-export const MAX_POST_ATTEMPTS = 8;
+export const MAX_UNCERTAIN_POSTS = 8;
 const BASE_BACKOFF_MS = 5_000;
 const MAX_BACKOFF_MS = 10 * 60_000;
 
@@ -49,14 +51,12 @@ export interface OrderView {
   completedAt: string | null;
 }
 
-interface OrderRow {
+/** attemptDelivery 认领订单后拿到的字段 */
+interface ClaimedOrder {
   id: string;
-  user_id: string;
-  product_id: string;
-  price: number;
-  status: OrderView['status'];
+  external_product_id: string;
   attempts: number;
-  external_product_id: string | null;
+  uncertain_posts: number;
 }
 
 const ORDER_VIEW_SQL = `
@@ -100,8 +100,10 @@ export async function redeem(
       return { orderId: existing[0].id, needsDelivery: false }; // 重复提交：返回原订单，不再扣分
     }
 
-    const { rows: products } = await tx.query<{ name: string; price: number; fulfillment: string }>(
-      'SELECT name, price, fulfillment FROM products WHERE id = $1 AND active',
+    const { rows: products } = await tx.query<{
+      name: string; price: number; fulfillment: string; external_product_id: string | null;
+    }>(
+      'SELECT name, price, fulfillment, external_product_id FROM products WHERE id = $1 AND active',
       [productId],
     );
     const product = products[0];
@@ -113,10 +115,11 @@ export async function redeem(
     const id = newOrderId();
     const internal = product.fulfillment === 'internal';
     await tx.query(
-      `INSERT INTO orders (id, user_id, product_id, price, idempotency_key, status, completed_at, next_attempt_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO orders (id, user_id, product_id, price, external_product_id, idempotency_key,
+                           status, completed_at, next_attempt_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
-        id, userId, productId, product.price, idempotencyKey,
+        id, userId, productId, product.price, product.external_product_id, idempotencyKey,
         internal ? 'delivered' : 'processing',
         internal ? new Date() : null,
         // 外部商品：给同步调用留出时间窗，窗口内后台不会插手；进程若在调用前崩溃，窗口过后后台接手
@@ -139,32 +142,45 @@ export async function redeem(
  * 认领后在事务外调用外部 API，不会长时间占着数据库连接和行锁。
  */
 export async function attemptDelivery(deps: Deps, orderId: string, timeoutMs: number): Promise<DeliveryResult | null> {
-  const { rows } = await deps.db.query<OrderRow>(
-    `UPDATE orders o SET lease_until = now() + ($2 || ' milliseconds')::interval,
-                         attempts = attempts + 1, updated_at = now()
-     FROM products p
-     WHERE o.id = $1 AND p.id = o.product_id AND o.status = 'processing'
-       AND (o.lease_until IS NULL OR o.lease_until < now())
-     RETURNING o.id, o.user_id, o.product_id, o.price, o.status, o.attempts, p.external_product_id`,
-    [orderId, LEASE_MS],
+  // 认领时就把 next_attempt_at 推后一个退避周期：万一进程在调用外部 API 时崩溃，
+  // 后台不会在租约一过期就立刻接手，GET 确认和上一次 POST 之间始终隔着足够的时间。
+  const { rows } = await deps.db.query<ClaimedOrder>(
+    `UPDATE orders SET lease_until = now() + $2::int * interval '1 millisecond',
+                       attempts = attempts + 1,
+                       next_attempt_at = now() + LEAST($3::int * power(2, attempts), $4::int) * interval '1 millisecond',
+                       updated_at = now()
+     WHERE id = $1 AND status = 'processing' AND (lease_until IS NULL OR lease_until < now())
+     RETURNING id, external_product_id, attempts, uncertain_posts`,
+    [orderId, LEASE_MS, BASE_BACKOFF_MS, MAX_BACKOFF_MS],
   );
   const order = rows[0];
   if (!order) return null; // 已完成，或别人正在处理
+  const { goods } = deps;
+  const productId = order.external_product_id;
 
-  if (order.attempts <= MAX_POST_ATTEMPTS) {
-    const result = await deps.goods.createDelivery(order.id, order.external_product_id!, timeoutMs);
-    if (result.kind === 'delivered') await markDelivered(deps.db, order.id, result.code);
-    else if (result.kind === 'rejected') await failAndRefund(deps.db, order.id, result.reason);
-    else await scheduleRetry(deps.db, order, result.kind === 'unknown' ? result : { reason: 'UNEXPECTED' });
-    return result;
+  let result: DeliveryResult;
+  let countUncertain = false;
+  if (order.uncertain_posts < MAX_UNCERTAIN_POSTS) {
+    result = await goods.createDelivery(order.id, productId, timeoutMs);
+    countUncertain = result.kind === 'unknown' && result.maybeIssued;
+    // 之前有过结果不确定的 POST 时，这次的「拒绝」不能直接采信：码可能在那次就已经生成了。
+    // 先 GET 确认：查到码就发放；明确 404 才按拒绝处理；GET 也失败就继续等。
+    if (result.kind === 'rejected' && order.uncertain_posts > 0) {
+      const check = await goods.getDelivery(order.id, productId, timeoutMs);
+      if (check.kind !== 'not_found') result = check;
+    }
+  } else {
+    // 不确定的 POST 已达上限：不再 POST，改用 GET 问外部「到底有没有这笔」。
+    // 距上一次 POST 至少隔了一个退避周期，此时的 404 才能可信地表示「没有生成过码」。
+    result = await goods.getDelivery(order.id, productId, timeoutMs);
   }
 
-  // 重试已达上限：不再 POST，改为 GET 确认外部最终状态。
-  // 距上一次 POST 至少隔了一个退避周期，此时的 404 才能可信地表示「没有生成过码」。
-  const result = await deps.goods.getDelivery(order.id, timeoutMs);
-  if (result.kind === 'delivered') await markDelivered(deps.db, order.id, result.code);
-  else if (result.kind === 'not_found') await failAndRefund(deps.db, order.id, 'GAVE_UP_NOT_FOUND');
-  else await scheduleRetry(deps.db, order, result.kind === 'unknown' ? result : { reason: 'UNEXPECTED' });
+  switch (result.kind) {
+    case 'delivered': await markDelivered(deps.db, order.id, result.code); break;
+    case 'rejected': await failAndRefund(deps.db, order.id, result.reason); break;
+    case 'not_found': await failAndRefund(deps.db, order.id, 'GAVE_UP_NOT_FOUND'); break;
+    case 'unknown': await scheduleRetry(deps.db, order, result, countUncertain); break;
+  }
   return result;
 }
 
@@ -199,21 +215,30 @@ export async function failAndRefund(db: Db, orderId: string, reason: string) {
   });
 }
 
+/** 第 n 次尝试之后等多久：5s、10s、20s……最长 10 分钟 */
 export function backoffMs(attempts: number): number {
   return Math.min(BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1), MAX_BACKOFF_MS);
 }
 
-async function scheduleRetry(db: Db, order: OrderRow, result: { reason: string; retryAfterMs?: number }) {
+async function scheduleRetry(
+  db: Db,
+  order: ClaimedOrder,
+  result: { reason: string; retryAfterMs?: number },
+  countUncertain: boolean,
+) {
   const delay = Math.max(backoffMs(order.attempts), result.retryAfterMs ?? 0);
   await db.query(
-    `UPDATE orders SET last_error = $2, next_attempt_at = now() + ($3 || ' milliseconds')::interval,
-                       lease_until = NULL, updated_at = now()
+    `UPDATE orders SET last_error = $2, next_attempt_at = now() + $3::int * interval '1 millisecond',
+                       uncertain_posts = uncertain_posts + $4::int, lease_until = NULL, updated_at = now()
      WHERE id = $1 AND status = 'processing'`,
-    [order.id, result.reason, delay],
+    [order.id, result.reason, delay, countUncertain ? 1 : 0],
   );
 }
 
-/** 后台补发：取到期的 processing 订单逐个尝试。串行执行，天然控制对外部 API 的请求频率。 */
+/**
+ * 后台补发：取到期的 processing 订单逐个尝试。
+ * 每轮最多 limit 笔、串行执行；一旦被限流就停止本轮并按 Retry-After 等待，不会把额度烧光。
+ */
 export async function processDueOrders(deps: Deps, limit = 5): Promise<number> {
   const { rows } = await deps.db.query<{ id: string }>(
     `SELECT id FROM orders
@@ -226,26 +251,22 @@ export async function processDueOrders(deps: Deps, limit = 5): Promise<number> {
   for (const { id } of rows) {
     const result = await attemptDelivery(deps, id, deps.timeouts?.worker ?? WORKER_TIMEOUT_MS);
     if (result) processed++;
-    // 被限流时本轮不再继续打外部 API
     if (result?.kind === 'unknown' && result.reason === 'RATE_LIMITED') break;
   }
   return processed;
 }
 
+/** 每 intervalMs 跑一轮补发。返回的 stop() 会等正在进行的那一轮结束，便于优雅退出。 */
 export function startWorker(deps: Deps, intervalMs = 3_000, log: (e: unknown) => void = console.error) {
-  let running = false;
-  const timer = setInterval(async () => {
-    if (running) return;
-    running = true;
-    try {
-      await processDueOrders(deps);
-    } catch (err) {
-      log(err);
-    } finally {
-      running = false;
-    }
+  let inFlight: Promise<void> | null = null;
+  const timer = setInterval(() => {
+    if (inFlight) return;
+    inFlight = processDueOrders(deps).then(() => undefined, log).finally(() => { inFlight = null; });
   }, intervalMs);
-  return () => clearInterval(timer);
+  return async () => {
+    clearInterval(timer);
+    await inFlight;
+  };
 }
 
 export async function listOrders(db: Db, userId: string): Promise<OrderView[]> {

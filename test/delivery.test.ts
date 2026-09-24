@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { attemptDelivery, MAX_POST_ATTEMPTS, processDueOrders, redeem, type Deps } from '../server/services/orders.js';
+import { attemptDelivery, backoffMs, failAndRefund, MAX_UNCERTAIN_POSTS, processDueOrders, redeem, type Deps } from '../server/services/orders.js';
+import { createDigitalGoodsClient } from '../server/external/digitalGoods.js';
 import { assertInvariants, balanceOf, createUser, makeDue, useTestEnv } from './helpers.js';
 
 const env = await useTestEnv();
@@ -10,7 +11,7 @@ const key = () => `k_${Math.random().toString(36).slice(2, 12)}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function orderRow(id: string) {
-  const { rows } = await db.query('SELECT status, code, attempts, last_error, failure_reason, next_attempt_at FROM orders WHERE id = $1', [id]);
+  const { rows } = await db.query('SELECT status, code, attempts, uncertain_posts, last_error, failure_reason, next_attempt_at FROM orders WHERE id = $1', [id]);
   return rows[0];
 }
 
@@ -120,10 +121,10 @@ describe('外部 API 异常时的一致性', () => {
     fake.setBehavior((r) => (r.method === 'POST' ? { commit: false, status: 503 } : undefined));
     const u = await createUser(db, 100);
     const order = await redeem(deps, u, 'ebook', key());
-    await drain(MAX_POST_ATTEMPTS + 2);
+    await drain(MAX_UNCERTAIN_POSTS + 2);
 
     expect(await orderRow(order.id)).toMatchObject({ status: 'failed', failure_reason: 'GAVE_UP_NOT_FOUND' });
-    expect(fake.requests.filter((r) => r.method === 'POST')).toHaveLength(MAX_POST_ATTEMPTS);
+    expect(fake.requests.filter((r) => r.method === 'POST')).toHaveLength(MAX_UNCERTAIN_POSTS);
     expect(fake.requests.filter((r) => r.method === 'GET')).toHaveLength(1);
     expect(await balanceOf(db, u)).toBe(100);
     await assertInvariants(db, fake);
@@ -133,7 +134,7 @@ describe('外部 API 异常时的一致性', () => {
     fake.setBehavior((r) => (r.method === 'POST' ? { commit: true, status: 500 } : undefined));
     const u = await createUser(db, 100);
     const order = await redeem(deps, u, 'ebook', key());
-    await drain(MAX_POST_ATTEMPTS + 2);
+    await drain(MAX_UNCERTAIN_POSTS + 2);
 
     expect(await orderRow(order.id)).toMatchObject({ status: 'delivered', code: fake.deliveries.get(order.id)!.code });
     expect(await balanceOf(db, u)).toBe(0);
@@ -144,11 +145,106 @@ describe('外部 API 异常时的一致性', () => {
     fake.setBehavior(() => ({ commit: false, status: 503 }));
     const u = await createUser(db, 100);
     const order = await redeem(deps, u, 'ebook', key());
-    await drain(MAX_POST_ATTEMPTS + 5);
+    await drain(MAX_UNCERTAIN_POSTS + 5);
 
     expect((await orderRow(order.id))!.status).toBe('processing');
     expect(await balanceOf(db, u)).toBe(0);
     await assertInvariants(db, fake);
+  });
+
+  it('401 持续很久也不消耗 POST 预算：Key 恢复后照常发码，不会退款', async () => {
+    fake.setBehavior(() => ({ commit: false, status: 401 }));
+    const u = await createUser(db, 100);
+    const order = await redeem(deps, u, 'ebook', key());
+    await drain(MAX_UNCERTAIN_POSTS + 5); // 远超 8 次
+
+    expect(await orderRow(order.id)).toMatchObject({ status: 'processing', uncertain_posts: 0 });
+    expect(fake.requests.filter((r) => r.method === 'GET')).toHaveLength(0); // 没有转入 GET 阶段
+    expect(await balanceOf(db, u)).toBe(0);
+
+    fake.setBehavior(() => undefined);
+    await drain();
+    expect(await orderRow(order.id)).toMatchObject({ status: 'delivered', code: fake.deliveries.get(order.id)!.code });
+  });
+
+  it('重试时收到 422，但首次 POST 其实已生成码：GET 确认后补记发放，不退款', async () => {
+    // 模拟一个「先校验商品、后查幂等」的外部实现：第一次响应丢失，第二次直接 422
+    fake.setBehavior((r) => (r.method !== 'POST' ? undefined : r.nth === 1 ? { commit: true, status: 500 } : { commit: false, status: 422 }));
+    const u = await createUser(db, 100);
+    const order = await redeem(deps, u, 'ebook', key());
+    expect(order.status).toBe('processing');
+    await drain();
+
+    expect(await orderRow(order.id)).toMatchObject({ status: 'delivered', code: fake.deliveries.get(order.id)!.code });
+    expect(fake.requests.filter((r) => r.method === 'GET')).toHaveLength(1);
+    expect(await balanceOf(db, u)).toBe(0);
+  });
+
+  it('重试时收到 422，外部确实没有码：GET 确认 404 后才退款', async () => {
+    fake.setBehavior((r) => (r.method !== 'POST' ? undefined : r.nth === 1 ? { commit: false, status: 503 } : { commit: false, status: 422 }));
+    const u = await createUser(db, 100);
+    const order = await redeem(deps, u, 'ebook', key());
+    await drain();
+
+    expect(await orderRow(order.id)).toMatchObject({ status: 'failed', failure_reason: 'PRODUCT_UNAVAILABLE' });
+    expect(fake.requests.filter((r) => r.method === 'GET')).toHaveLength(1);
+    expect(await balanceOf(db, u)).toBe(100);
+  });
+
+  it('首次就 422（之前没有不确定的结果）：直接退款，不多发 GET', async () => {
+    fake.setBehavior(() => ({ commit: false, status: 422 }));
+    const u = await createUser(db, 100);
+    await redeem(deps, u, 'ebook', key());
+    expect(fake.requests.filter((r) => r.method === 'GET')).toHaveLength(0);
+    expect(await balanceOf(db, u)).toBe(100);
+  });
+
+  it('连不上外部服务（连接被拒）：挂起不退款，恢复后补发', async () => {
+    const unreachable: Deps = { ...deps, goods: createDigitalGoodsClient('http://127.0.0.1:1', 'k') };
+    const u = await createUser(db, 100);
+    const order = await redeem(unreachable, u, 'ebook', key());
+    expect(order).toMatchObject({ status: 'processing', lastError: 'NETWORK' });
+    expect(await balanceOf(db, u)).toBe(0);
+
+    await drain(); // 用正常的 deps 补发
+    expect((await orderRow(order.id))!.status).toBe('delivered');
+  });
+
+  it('同步调用中途进程异常：分已扣、订单仍在，租约过期后由后台接手', async () => {
+    let calls = 0;
+    const flaky: Deps = {
+      ...deps,
+      goods: {
+        createDelivery: async (...args) => {
+          if (calls++ === 0) throw new Error('boom'); // 模拟认领之后、调用外部之前崩溃
+          return deps.goods.createDelivery(...args);
+        },
+        getDelivery: deps.goods.getDelivery,
+      },
+    };
+    const u = await createUser(db, 100);
+    await expect(redeem(flaky, u, 'ebook', key())).rejects.toThrow('boom');
+    const { rows } = await db.query<{ id: string; status: string; lease_until: Date | null }>('SELECT id, status, lease_until FROM orders');
+    expect(rows[0]).toMatchObject({ status: 'processing' });
+    expect(rows[0]!.lease_until).not.toBeNull();
+    expect(await balanceOf(db, u)).toBe(0);
+
+    await drain(); // makeDue 会清掉租约，相当于租约已过期
+    expect((await orderRow(rows[0]!.id))!.status).toBe('delivered');
+  });
+
+  it('退款函数被重复调用：只退一次', async () => {
+    fake.setBehavior(() => ({ commit: false, status: 422 }));
+    const u = await createUser(db, 100);
+    const order = await redeem(deps, u, 'ebook', key());
+    expect(order.status).toBe('failed');
+    await failAndRefund(db, order.id, 'AGAIN');
+    expect(await balanceOf(db, u)).toBe(100);
+    expect((await orderRow(order.id))!.failure_reason).toBe('PRODUCT_UNAVAILABLE');
+  });
+
+  it('退避间隔：5s 起每次翻倍，最长 10 分钟', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8, 9].map(backoffMs)).toEqual([5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000, 600_000, 600_000]);
   });
 
   it('租约：同一订单被同时处理时，只有一方会调用外部 API', async () => {

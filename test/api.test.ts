@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../server/app.js';
+import { SIGNUP_BONUS } from '../server/services/auth.js';
 import { useTestEnv } from './helpers.js';
 
 const { db, goods } = await useTestEnv();
@@ -22,7 +23,7 @@ describe('HTTP 接口：认证与数据隔离', () => {
     const res = await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'carol', password: 'secret1' } });
     expect(res.statusCode).toBe(200);
     const me = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie: res.headers['set-cookie'] as string } });
-    expect(me.json()).toMatchObject({ user: { username: 'carol' }, balance: 20 });
+    expect(me.json()).toMatchObject({ user: { username: 'carol' }, summary: { balance: SIGNUP_BONUS } });
   });
 
   it('重复用户名 409，错误密码 401', async () => {
@@ -58,6 +59,14 @@ describe('HTTP 接口：认证与数据隔离', () => {
     });
     expect(res.statusCode).toBe(422);
     expect(res.json().error.code).toBe('INSUFFICIENT_POINTS');
+  });
+
+  it('请求体不是合法 JSON：返回 4xx 而不是 500', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/api/auth/login', headers: { 'content-type': 'application/json' }, payload: '{bad',
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_REQUEST');
   });
 
   it('退出登录后 session 失效', async () => {

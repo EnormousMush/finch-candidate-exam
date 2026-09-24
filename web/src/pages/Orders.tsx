@@ -21,7 +21,7 @@ export function Orders() {
       if (!alive) return;
       if (r) {
         const signature = r.orders.map((o) => `${o.id}:${o.status}`).join(',');
-        if (lastSignature && signature !== lastSignature) refresh();
+        if (signature !== lastSignature) refresh();
         lastSignature = signature;
         setOrders(r.orders);
       }

@@ -65,7 +65,7 @@ function RedeemDialog({ product, onClose }: { product: Product; onClose: () => v
         setError({ msg: err.message, retryable: false });
       } else {
         // 网络错误或 5xx：不知道服务端是否已建单，用同一个幂等键重试是安全的
-        setError({ msg: '网络异常，无法确认结果。可以放心重试，不会重复扣分。', retryable: true });
+        setError({ msg: '网络异常，无法确认结果。可以放心重试，不会重复扣分；若直接关闭，请到「兑换记录」确认是否已生成订单。', retryable: true });
       }
       setState('error');
     } finally {

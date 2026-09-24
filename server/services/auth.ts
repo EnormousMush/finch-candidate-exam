@@ -56,15 +56,17 @@ export async function register(db: Db, username: string, password: string): Prom
   }
 }
 
+// 用户名不存在时也跑一次同样代价的哈希，让两种失败的响应时间一致，无法借此探测用户名
+const DUMMY_HASH = `scrypt$${'00'.repeat(16)}$${'00'.repeat(64)}`;
+
 export async function login(db: Db, username: string, password: string): Promise<SessionUser> {
   const { rows } = await db.query<{ id: string; username: string; password_hash: string }>(
     'SELECT id, username, password_hash FROM users WHERE username = $1',
     [username],
   );
   const user = rows[0];
-  if (!user || !(await verifyPassword(password, user.password_hash))) {
-    throw new AppError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
-  }
+  const ok = await verifyPassword(password, user?.password_hash ?? DUMMY_HASH);
+  if (!user || !ok) throw new AppError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
   return { id: user.id, username: user.username };
 }
 
@@ -76,6 +78,8 @@ export async function createSession(db: Db, userId: string): Promise<{ token: st
   await db.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [
     sha256(token), userId, expiresAt,
   ]);
+  // 顺手清掉过期会话，表不会无限增长
+  await db.query('DELETE FROM sessions WHERE expires_at < now()');
   return { token, expiresAt };
 }
 

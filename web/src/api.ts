@@ -42,7 +42,7 @@ export const api = {
   products: () => request<{ products: Product[] }>('GET', '/api/products'),
   orders: () => request<{ orders: Order[] }>('GET', '/api/orders'),
   redeem: (productId: string, idempotencyKey: string) =>
-    request<{ order: Order; balance: number }>('POST', '/api/orders', { productId, idempotencyKey }),
+    request<{ order: Order }>('POST', '/api/orders', { productId, idempotencyKey }),
   ledger: () => request<{ entries: LedgerEntry[] }>('GET', '/api/ledger'),
 };
 

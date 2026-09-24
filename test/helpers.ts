@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect } from 'vitest';
 import { createDb, withTx, type Db } from '../server/db/pool.js';
 import { seed } from '../server/db/seed.js';
 import { createDigitalGoodsClient } from '../server/external/digitalGoods.js';
@@ -22,6 +22,8 @@ export async function useTestEnv() {
     fake.setBehavior(() => undefined);
     await seed(db);
   });
+  // 每个用例结束后都对账：不管用例本身断言了什么，账目必须是平的
+  afterEach(() => assertInvariants(db, fake));
   afterAll(async () => {
     await fake.close();
     await db.end();

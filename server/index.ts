@@ -14,7 +14,8 @@ const app = await buildApp({ db, goods, cookieSecure: config.cookieSecure, logge
 
 // 生产模式下由同一个进程托管前端构建产物
 const dist = path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/dist');
-if (process.env.NODE_ENV === 'production' && existsSync(dist)) {
+if (process.env.NODE_ENV === 'production') {
+  if (!existsSync(dist)) throw new Error('未找到 web/dist，请先执行 pnpm build');
   await app.register(fastifyStatic, { root: dist });
   app.setNotFoundHandler((req, reply) =>
     req.url.startsWith('/api/') ? reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Not found' } }) : reply.sendFile('index.html'),
@@ -23,11 +24,14 @@ if (process.env.NODE_ENV === 'production' && existsSync(dist)) {
 
 const stopWorker = startWorker({ db, goods }, 3_000, (e) => app.log.error(e));
 app.log.info(`外部 API: ${config.goodsBaseUrl()}`);
+if (config.goodsApiKey() === 'dg_xxx') {
+  app.log.warn('DIGITAL_GOODS_API_KEY 仍是示例值，外部商品的兑换会一直处于「处理中」；没有 Key 时可用 pnpm dev:fake');
+}
 await app.listen({ port: config.port, host: '0.0.0.0' });
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, async () => {
-    stopWorker();
+    await stopWorker();
     await app.close();
     await db.end();
     process.exit(0);
